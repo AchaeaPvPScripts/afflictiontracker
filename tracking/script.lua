@@ -367,9 +367,11 @@ affs.sensitivity = aff:new({
 function affs.sensitivity:get(defs)
   if defs.deafness then
     defs.deafness = false
+    return false
   else
     self.confidence = 1
     raiseEvent("aff gained")
+    return true
   end
 end
 
@@ -517,37 +519,114 @@ function tracker:new(con)
   con.defences.rebounding = con.defences.rebounding or true
   con.defences.shield = con.defences.shield or true
 
+  con.confidence_pairs = {}
+  con.epsilon = 1e-6 -- TODO get from settings
+  con.illusion_chance = 0 -- TODO get from settings
+
   con.afflictions = con.afflictions or table.deepcopy(affs)
 
-  setmetatable(con, self)
-  self.__index = self
+  setmetatable(con, {__index = self})
   return con
 end
 
 function tracker:cure(map)
   local t = {}
-  local s = self
-  local a = s.afflictions
-  local d = s.defences
+  local w = {}
+  local idxlookup = {}
 
-  for name, affliction in pairs(a) do
+  for name, affliction in pairs(self.afflictions) do
     if map(affliction) and affliction.confidence > 0 then
       table.insert(t, name)
+      table.insert(w, affliction.confidence)
+      idxlookup[name] = #t
     end
   end
   if #t == 0 then return end
-  local change = 1/#t
-  for _, affliction in pairs(t) do
-    a[affliction].confidence = a[affliction].confidence - change
+  if #t == 1 then
+    self.afflictions[t[1]].confidence = 0
+    self:reset_pair_confidences(t[1])
+    return
   end
-  
+
+  local curechances = self:calculate_cure_chances(t, w)
+  self:cure_event_happened(t, w, curechances)
+
+  local w_new = {}
+  for i, name in ipairs(t) do
+
+    -- Update pairwise confidences
+    for otherName, otherAffliction in pairs(self.afflictions) do
+      local pairchance = self:get_pair_confidence(name, otherName)
+      local newConfidence
+      if idxlookup[otherName] then
+        -- E((aff[i] - cure[i]) * (aff[j] - cure[j])) =
+        --   E(aff[i] aff[j]) - curechances[i] * E(aff[i]aff[j]) -
+        --   curechances[j] * E(aff[i]aff[j]) + 0, since cure events never coincide
+        local j = idxlookup[otherName]
+        newConfidence = pairchance * (1 - curechances[i] - curechances[j])
+      else
+        newConfidence = pairchance * (1 - curechances[i])
+      end
+      self:set_pair_confidence(name, otherName, newConfidence)
+    end
+
+    self.afflictions[name]:set(w[i] * (1 - curechances[i]))
+  end
+
   self:cleanup()
   raiseEvent("tracker cure")
 end
 
+function tracker:gain(name)
+  if self.afflictions[name]:gain(self.defences) then
+    self:reset_pair_confidences(name)
+    return true
+  else return false end
+end
+
+function tracker:lose(name)
+  if self.afflictions[name]:lose(self.defences) then
+    self:reset_pair_confidences(name)
+    return true
+  else return false end
+end
+
+function tracker:lose_with_backtrack(name)
+  local had = self.afflictions[name].confidence
+  local didnthave = 1.0 - had
+  local illusory = self.illusion_chance
+  local real = 1.0 - illusory
+  if self.afflictions[name]:lose(self.defences) then
+    if didnnthave > self.epsilon then
+      for otherName, otherAffliction in pairs(self.afflictions) do
+        if otherName ~= name then
+          local pairchance = self:get_pair_confidence(name, otherName)
+          local other_but_not_this_chance = otherAffliction.confidence - pairchance
+          local newchance = other_but_not_this_chance / didnthave * real
+          if had > self.epsilon then
+            newchance = newchance + pairchance / had * illusory)
+          else
+            newchance = newchance + illusory
+          end
+          otherAffliction:set(other_but_not_this_chance / didnthave * real + pairchance / had * illusory)
+        end
+      end
+    else
+      raiseEvent("backtracking with 100% surety, everything is very bad")
+      self:reset()
+    end
+    self:reset_pair_confidences(name)
+    self:cleanup()
+    return true
+  else return false end
+end
+
+
 function tracker:cleanup()
   for name, affliction in pairs(self.afflictions) do
-    if affliction.confidence < 0.25 then affliction.confidence = 0 end
+    local c = affliction.confidence
+    if c > 0 and c < self.epsilon then self:lose(name) end
+    if c < 1.0 and c > 1.0 - self.epsilon then self:gain(name) end
   end
 end
 
@@ -555,7 +634,167 @@ function tracker:reset()
   for name, aff in pairs(self.afflictions) do
     aff.confidence = 0
   end
+  self.condifence_pairs = {}
   raiseEvent("tracker cure")
+end
+
+--------------------------------------------------------------------
+-- Helper functions
+--------------------------------------------------------------------
+
+-- Get pair confidence for affs A, B. If not recorded, assumed independent.
+
+function tracker:get_pair_confidence(affA, affB)
+  if affA == affB then return self.afflictions[affA].confidence
+  else if affA > affB then return self:get_pair_confidence(affB, affA)
+  else if self.confidence_pairs[affA] and self.confidence_pairs[affA][affB] then
+    return self.confidence_pairs[affA][affB]
+  else
+    return self.afflictions[affA].confidence * self.afflictions[affB].confidence
+end
+
+function tracker:reset_pair_confidences(affA)
+  for affB, subt in pairs(self.confidence_pairs) do
+    if affB < affA then
+      subt[affA] = nil
+    end
+  end
+  self.confidence_pairs[affA] = nil
+end
+
+function tracker:set_pair_confidence(affA, affB, newConfidence)
+  if affA == affB then return false
+  else if affA > affB then return self:set_pair_confidence(affB, affA, newConfidence)
+  else
+    confidenceDefault = self.afflictions[affA].confidence * self.afflictions[affB].confidence
+    if math.abs(newConfidence - confidenceDefault) > self.epsilon then
+      self.confidence_pairs[affA] = self.confidence_pairs[affA] or {}
+      self.confidence_pairs[affA][affB] = newConfidence
+      return true
+    else if self.confidence_pairs[affA] then self.confidence_pairs[affA][affB] = nil end
+  end
+end
+
+function tracker:estimate_triplicate_chance(name1, conf1, name2, conf2, name3, conf3)
+  local conf12 = self:get_pair_confidence(name, otherName)
+  local conf13 = self:get_pair_confidence(name, thirdName)
+  local conf23 = self:get_pair_confidence(otherName, thirdName)
+
+  local lowBound = math.max(
+    conf12 + conf13 - conf1,
+    conf12 + conf23 - conf2,
+    conf23 + conf13 - conf3
+    )
+  local hiBound = math.min(conf12, conf13, conf23)
+  if hiBound - lowBound < self.epsilon then
+    return lowBound
+  else
+    local conf123
+    local var1 = conf1 * (1 - conf1)
+    local var2 = conf2 * (1 - conf2)
+    local var3 = conf3 * (1 - conf3)
+
+    local w1 = var2 * var3
+    local w2 = var1 * var3
+    local w3 = var1 * var2
+
+    local v1 = conf23 * conf1
+    local v2 = conf13 * conf2
+    local v3 = conf12 * conf3
+
+    if w1 + w2 + v3 < self.epsilon then
+      conf123 =  (v1 + v2 + v3) / 3.0
+    else
+      conf123 = (w1 * v1 + w2 * v2 + w3 * v3) / (w1 + w2 + w3)
+    end
+    return math.max(lowBound, math.min(hiBound, conf123))
+  end
+end
+
+function tracker:calculate_cure_chances(t, w)
+  local curechances = {}
+
+  for affNo, affName in ipairs(t) do
+    local weights = {1}
+    local affP = w[affNo]
+    for affOther, otherName in ipairs(t) do
+      if affOther ~= affNo then
+        local s = #weights
+        local conditional_confidence = self:get_pair_confidence(affName, affOther) / affP
+        weights[s + 1] = weights[s] * conditional_confidence
+        for i = s,2,-1 do
+          weights[i] = (weights[i-1] * conditional_confidence +
+            weights[i] * (1 - conditional_confidence))
+        end
+        weights[1] = weights[1] * (1 - conditional_confidence)
+      end
+    end
+
+    local cureChance = 0
+    for n, p in ipairs(weights) do cureChance += p / n end
+    curechances[affNo] = cureChance
+  end
+  return curechances
+end
+
+function tracker:cure_event_happened(t, w, curechances)
+  local cured = 0
+  for i = 1, #w do cured = cured + w[i] * curechances[i] end
+  local illusion = self.illusion_chance
+  local real = 1.0 - illusion
+  local notcured = 1.0 - cured
+
+  -- Adjust flat confidences
+  local new_confidences = {}
+
+  for name, affliction in pairs(self.afflictions) do
+    local chanceifcured = 0
+    for i, otherName in ipairs(t) do
+      chanceifcured = chanceifcured + curechances[i] * self:get_pair_confidence(name, otherName)
+    end
+    local chanceifnotcured = affliction.confidence - chanceifcured
+    new_confidences[name] = chanceifcured / cured * real + chanceifnotcured / notcured * illusion
+  end
+
+  -- Adjust pair confidences
+
+  for name, affliction in pairs(self.afflictions) do
+    for otherName, otherAffliction in pairs(self.afflictions) do
+      -- Calculate E[affliction * otherAffliction * sum(cure)]
+      -- equals sum(curechances[i] * E[affliction * otherAffliction * t[i]])
+      local pairconfidence = self:get_pair_confidence(name, otherName)
+      if name < otherName then
+        local totalChanceIfCured = 0
+        for i = 1, #w do
+          local thirdName = t[i]
+          if thirdName == name or thirdName == otherName then
+            totalChanceIfCured = totalChanceIfCured + pairconfidence * curechances[i]
+          else
+            local conf123 = self:estimate_triplicate_chance(
+              name, affliction.confidence,
+              otherName, otherAffliction.confidence,
+              thirdName, w[i]
+              )
+            totalChanceIfCured = totalChanceIfCured + conf123 * curechances[i]
+          end
+        end
+        local totalChanceIfNotCured = pairconfidence - totalChanceIfCured
+        local newChance = totalChanceIfCured / cured * real + chanceifnotcured / notcured * illusion
+        self:set_pair_confidence(name, otherName, newChance)
+      end
+    end
+  end
+
+  -- Update w
+  for i, name in ipairs(t) do
+    w[i] = new_confidences[name]
+    new_confidences[name] = nil
+  end
+
+  -- Update all others and fire events for them
+  for name, affliction in pairs(self.afflictions) do
+    if new_confidences[name] then affliction:set(new_confidences[name]) end
+  end
 end
 
 return tracker

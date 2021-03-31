@@ -33,16 +33,19 @@ end
 function afflictions:get()
   self.confidence = 1
   raiseEvent("aff gained")
+  return true
 end
 
 function afflictions:lose()
   self.confidence = 0
   raiseEvent("aff lost")
+  return true
 end
 
 function afflictions:set(confidence)
   self.confidence = confidence
   raiseEvent("aff changed")
+  return true
 end
 
 return afflictions
