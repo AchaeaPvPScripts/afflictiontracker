@@ -600,7 +600,7 @@ function tracker:lose_with_backtrack(name)
       for otherName, otherAffliction in pairs(self.afflictions) do
         if otherName ~= name then
           local pairchance = self:get_pair_confidence(name, otherName)
-          local other_but_not_this_chance = otherAffliction.confidence - pairchanceoiiiii
+          local other_but_not_this_chance = otherAffliction.confidence - pairchance
           otherAffliction:set(other_but_not_this_chance / didnthave)
         end
       end
