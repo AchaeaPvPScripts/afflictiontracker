@@ -1,4 +1,4 @@
-local aff = require("afflictions")
+local aff = require("tracking.afflictions")
 local tracker = {}
 
 --[[
@@ -497,7 +497,9 @@ affs.whisperingmadness = aff:new({
 })
 affs.wristfractures = aff:new({
   cures = {"apply health to arms"}
-}) 
+})
+
+tracker.__index = tracker
 
 function tracker:new(con)
   con = con or {}
@@ -524,7 +526,7 @@ function tracker:new(con)
 
   con.afflictions = con.afflictions or table.deepcopy(affs)
 
-  setmetatable(con, {__index = self})
+  setmetatable(con, self)
   return con
 end
 
@@ -577,7 +579,7 @@ function tracker:cure(map)
 end
 
 function tracker:gain(name)
-  if self.afflictions[name]:gain(self.defences) then
+  if self.afflictions[name]:get(self.defences) then
     self:reset_pair_confidences(name)
     return true
   else return false end
@@ -598,7 +600,7 @@ function tracker:lose_with_backtrack(name)
       for otherName, otherAffliction in pairs(self.afflictions) do
         if otherName ~= name then
           local pairchance = self:get_pair_confidence(name, otherName)
-          local other_but_not_this_chance = otherAffliction.confidence - pairchance
+          local other_but_not_this_chance = otherAffliction.confidence - pairchanceoiiiii
           otherAffliction:set(other_but_not_this_chance / didnthave)
         end
       end
@@ -637,11 +639,12 @@ end
 
 function tracker:get_pair_confidence(affA, affB)
   if affA == affB then return self.afflictions[affA].confidence
-  else if affA > affB then return self:get_pair_confidence(affB, affA)
-  else if self.confidence_pairs[affA] and self.confidence_pairs[affA][affB] then
+  elseif affA > affB then return self:get_pair_confidence(affB, affA)
+  elseif self.confidence_pairs[affA] and self.confidence_pairs[affA][affB] then
     return self.confidence_pairs[affA][affB]
   else
     return self.afflictions[affA].confidence * self.afflictions[affB].confidence
+  end
 end
 
 function tracker:reset_pair_confidences(affA)
@@ -655,28 +658,31 @@ end
 
 function tracker:set_pair_confidence(affA, affB, newConfidence)
   if affA == affB then return false
-  else if affA > affB then return self:set_pair_confidence(affB, affA, newConfidence)
+  elseif affA > affB then return self:set_pair_confidence(affB, affA, newConfidence)
   else
     confidenceDefault = self.afflictions[affA].confidence * self.afflictions[affB].confidence
     if math.abs(newConfidence - confidenceDefault) > self.epsilon then
       self.confidence_pairs[affA] = self.confidence_pairs[affA] or {}
       self.confidence_pairs[affA][affB] = newConfidence
       return true
-    else if self.confidence_pairs[affA] then self.confidence_pairs[affA][affB] = nil end
+    elseif self.confidence_pairs[affA] then self.confidence_pairs[affA][affB] = nil end
   end
 end
 
 function tracker:estimate_triplicate_chance(name1, conf1, name2, conf2, name3, conf3)
-  local conf12 = self:get_pair_confidence(name, otherName)
-  local conf13 = self:get_pair_confidence(name, thirdName)
-  local conf23 = self:get_pair_confidence(otherName, thirdName)
+  if conf1 == 0 or conf2 == 0 or conf3 == 0 then return 0 end
+  local conf12 = self:get_pair_confidence(name1, name2)
+  local conf13 = self:get_pair_confidence(name1, name3)
+  local conf23 = self:get_pair_confidence(name2, name3)
+  if conf12 == 0 or conf13 == 0 or conf23 == 0 then return 0 end
 
   local lowBound = math.max(
     conf12 + conf13 - conf1,
     conf12 + conf23 - conf2,
-    conf23 + conf13 - conf3
+    conf23 + conf13 - conf3,
+    0
     )
-  local hiBound = math.min(conf12, conf13, conf23)
+  local hiBound = math.min(conf12, conf13, conf23, 1)
   if hiBound - lowBound < self.epsilon then
     return lowBound
   else
@@ -711,7 +717,7 @@ function tracker:calculate_cure_chances(t, w)
     for affOther, otherName in ipairs(t) do
       if affOther ~= affNo then
         local s = #weights
-        local conditional_confidence = self:get_pair_confidence(affName, affOther) / affP
+        local conditional_confidence = self:get_pair_confidence(affName, otherName) / affP
         weights[s + 1] = weights[s] * conditional_confidence
         for i = s,2,-1 do
           weights[i] = (weights[i-1] * conditional_confidence +
@@ -722,7 +728,7 @@ function tracker:calculate_cure_chances(t, w)
     end
 
     local cureChance = 0
-    for n, p in ipairs(weights) do cureChance += p / n end
+    for n, p in ipairs(weights) do cureChance = cureChance + p / n end
     curechances[affNo] = cureChance
   end
   return curechances
