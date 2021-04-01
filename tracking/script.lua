@@ -521,7 +521,6 @@ function tracker:new(con)
 
   con.confidence_pairs = {}
   con.epsilon = 1e-6 -- TODO get from settings
-  con.illusion_chance = 0 -- TODO get from settings
 
   con.afflictions = con.afflictions or table.deepcopy(affs)
 
@@ -594,21 +593,13 @@ end
 function tracker:lose_with_backtrack(name)
   local had = self.afflictions[name].confidence
   local didnthave = 1.0 - had
-  local illusory = self.illusion_chance
-  local real = 1.0 - illusory
   if self.afflictions[name]:lose(self.defences) then
     if didnnthave > self.epsilon then
       for otherName, otherAffliction in pairs(self.afflictions) do
         if otherName ~= name then
           local pairchance = self:get_pair_confidence(name, otherName)
           local other_but_not_this_chance = otherAffliction.confidence - pairchance
-          local newchance = other_but_not_this_chance / didnthave * real
-          if had > self.epsilon then
-            newchance = newchance + pairchance / had * illusory)
-          else
-            newchance = newchance + illusory
-          end
-          otherAffliction:set(other_but_not_this_chance / didnthave * real + pairchance / had * illusory)
+          otherAffliction:set(other_but_not_this_chance / didnthave)
         end
       end
     else
@@ -740,8 +731,6 @@ end
 function tracker:cure_event_happened(t, w, curechances)
   local cured = 0
   for i = 1, #w do cured = cured + w[i] * curechances[i] end
-  local illusion = self.illusion_chance
-  local real = 1.0 - illusion
   local notcured = 1.0 - cured
 
   -- Adjust flat confidences
@@ -753,7 +742,7 @@ function tracker:cure_event_happened(t, w, curechances)
       chanceifcured = chanceifcured + curechances[i] * self:get_pair_confidence(name, otherName)
     end
     local chanceifnotcured = affliction.confidence - chanceifcured
-    new_confidences[name] = chanceifcured / cured * real + chanceifnotcured / notcured * illusion
+    new_confidences[name] = chanceifcured / cured
   end
 
   -- Adjust pair confidences
@@ -779,7 +768,7 @@ function tracker:cure_event_happened(t, w, curechances)
           end
         end
         local totalChanceIfNotCured = pairconfidence - totalChanceIfCured
-        local newChance = totalChanceIfCured / cured * real + chanceifnotcured / notcured * illusion
+        local newChance = totalChanceIfCured / cured
         self:set_pair_confidence(name, otherName, newChance)
       end
     end
