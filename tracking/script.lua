@@ -618,8 +618,29 @@ end
 function tracker:cleanup()
   for name, affliction in pairs(self.afflictions) do
     local c = affliction.confidence
-    if c > 0 and c < self.epsilon then self:lose(name) end
-    if c < 1.0 and c > 1.0 - self.epsilon then self:gain(name) end
+    if c > 0 and c < self.epsilon or c < 0 then
+      -- no need for checking defences
+      affliction.confidence = 0
+      raiseEvent("aff lost")
+    elseif c < 1 and c > 1 - self.epsilon or c > 1 then
+      afflction.confidence = 1
+    end
+  end
+
+  for name1, t in pairs(self.confidence_pairs) do
+    local confidence1 = self.afflictions[name1].confidence
+    for name2, conf in pairs(t) do
+      local confidence2 = self.afflictions[name2].confidence
+      local upperBound = math.min(confidence1, confidence2)
+      local lowerBound = math.max(0, confidence1 + confidence2 - 1)
+      local default = confidence1 * confidence2
+      local clamped = math.max(lowerBound, math.min(upperBound, conf))
+      if math.abs(clamped - default) < self.epsilon then
+        t[name2] = nil
+      else
+        t[name2] = clamped
+      end
+    end
   end
 end
 
@@ -649,9 +670,7 @@ end
 
 function tracker:reset_pair_confidences(affA)
   for affB, subt in pairs(self.confidence_pairs) do
-    if affB < affA then
       subt[affA] = nil
-    end
   end
   self.confidence_pairs[affA] = nil
 end
